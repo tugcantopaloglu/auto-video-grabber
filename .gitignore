@@ -1,0 +1,15 @@
+node_modules/
+downloads/
+*.log
+.env
+.DS_Store
+*.tmp
+.cache/
+
+# AI Assistant files
+CLAUDE.md
+.claude/
+*.claude
+.ai/
+.cursor/
+.aider*

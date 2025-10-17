@@ -1,0 +1,30 @@
+{
+  "downloadPath": "./downloads",
+  "maxConcurrentDownloads": 3,
+  "retryAttempts": 3,
+  "timeout": 30000,
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "websites": {
+    "ine.com": {
+      "selectors": {
+        "courseTitle": "h1.course-title, h1",
+        "videoPlayer": "video",
+        "videoSource": "video source, source",
+        "lessonList": "a.lesson-item, .lesson a, .curriculum-item a",
+        "documents": "a[href$='.pdf'], a[href$='.doc'], a[href$='.docx'], a[href$='.zip']",
+        "content": ".lesson-content, .course-content, main"
+      },
+      "waitForSelector": "video, .video-container",
+      "requiresAuth": true
+    },
+    "default": {
+      "selectors": {
+        "videoPlayer": "video",
+        "videoSource": "video source, source",
+        "documents": "a[href$='.pdf'], a[href$='.doc'], a[href$='.docx'], a[href$='.zip']"
+      },
+      "waitForSelector": "video",
+      "requiresAuth": false
+    }
+  }
+}
