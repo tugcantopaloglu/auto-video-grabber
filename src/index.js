@@ -164,4 +164,77 @@ program
     }
   });
 
+program
+  .command('debug <url>')
+  .description('Debug a course page to find the right selectors')
+  .action(async (url) => {
+    try {
+      logger.info('Auto Video Grabber - Debug Mode\n');
+
+      const config = await loadConfig();
+      const BaseScraper = (await import('./scrapers/baseScraper.js')).default;
+      const scraper = new BaseScraper(url, config);
+
+      await scraper.initialize();
+
+      const website = new URL(url).hostname.replace('www.', '');
+      const websiteConfig = config.websites[website] || config.websites.default;
+
+      const navigated = await scraper.navigateTo(url, websiteConfig.requiresAuth);
+
+      if (websiteConfig.requiresAuth) {
+        await scraper.waitForAuth();
+      }
+
+      logger.info('Analyzing page structure...\n');
+
+      const pageInfo = await scraper.debugPageStructure();
+      await scraper.expandAllSections();
+
+      // Save detailed link analysis
+      const detailedLinks = await scraper.page.evaluate(() => {
+        const links = [];
+        document.querySelectorAll('a[href]').forEach((link, idx) => {
+          const href = link.href;
+          const text = link.textContent.trim();
+          const classes = link.className;
+          const id = link.id;
+
+          if (text) {
+            links.push({
+              index: idx,
+              href,
+              text: text.substring(0, 100),
+              classes,
+              id
+            });
+          }
+        });
+        return links;
+      });
+
+      logger.info('\n=== ALL LINKS ON PAGE ===\n');
+      detailedLinks.forEach(link => {
+        logger.info(`${link.index}. "${link.text}"`);
+        logger.info(`   URL: ${link.href}`);
+        if (link.classes) logger.info(`   Classes: ${link.classes}`);
+        if (link.id) logger.info(`   ID: ${link.id}`);
+        logger.info('');
+      });
+
+      await fs.writeJson('debug-page-structure.json', {
+        pageInfo,
+        detailedLinks,
+        currentUrl: scraper.page.url()
+      }, { spaces: 2 });
+
+      logger.success('\nDebug info saved to: debug-page-structure.json');
+
+      await scraper.close();
+    } catch (error) {
+      logger.error(`Debug failed: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
 program.parse();

@@ -363,14 +363,21 @@ class BaseScraper {
       // First, expand all collapsible sections
       await this.expandAllSections();
 
+      // Log what selector we're using
+      logger.info(`Looking for lessons with selector: ${selectors.lessonList}`);
+
       const lessonElements = await this.page.evaluate((sel) => {
         const items = [];
         const links = document.querySelectorAll(sel.lessonList);
         const seenUrls = new Set();
 
+        console.log(`Found ${links.length} links matching selector`);
+
         links.forEach((link, index) => {
           const url = link.href;
           const title = link.textContent.trim();
+
+          console.log(`Link ${index}: ${title.substring(0, 50)} -> ${url}`);
 
           // Avoid duplicates and empty titles
           if (url && title && !seenUrls.has(url)) {
@@ -385,6 +392,33 @@ class BaseScraper {
 
         return items;
       }, selectors);
+
+      if (lessonElements.length > 0) {
+        logger.success(`Found ${lessonElements.length} unique lessons`);
+        lessonElements.forEach((lesson, i) => {
+          logger.info(`  ${i + 1}. ${lesson.title}`);
+        });
+      } else {
+        logger.warning('No lessons found with configured selectors');
+
+        // Try to find ANY links that might be lessons
+        const allPossibleLinks = await this.page.evaluate(() => {
+          const possible = [];
+          document.querySelectorAll('a[href]').forEach(link => {
+            const href = link.href;
+            const text = link.textContent.trim();
+            if (text && text.length > 5 && text.length < 200) {
+              possible.push({ href, text: text.substring(0, 60) });
+            }
+          });
+          return possible.slice(0, 20); // First 20 links
+        });
+
+        logger.info('\nFirst 20 links found on page:');
+        allPossibleLinks.forEach((link, i) => {
+          logger.info(`  ${i + 1}. ${link.text} -> ${link.href.substring(0, 80)}`);
+        });
+      }
 
       lessons.push(...lessonElements);
     } catch (error) {
