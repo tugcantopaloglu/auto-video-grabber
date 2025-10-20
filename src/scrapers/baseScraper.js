@@ -28,13 +28,23 @@ class BaseScraper {
     await this.page.setViewport({ width: 1920, height: 1080 });
   }
 
-  async navigateTo(url) {
+  async navigateTo(url, waitForAuth = false) {
     logger.info(`Navigating to: ${url}`);
     try {
+      // Use a more lenient wait strategy for auth-protected pages
+      const waitStrategy = waitForAuth ? 'domcontentloaded' : 'networkidle2';
+      const navigationTimeout = waitForAuth ? 60000 : this.config.timeout;
+
       await this.page.goto(url, {
-        waitUntil: 'networkidle2',
-        timeout: this.config.timeout
+        waitUntil: waitStrategy,
+        timeout: navigationTimeout
       });
+
+      // If we're expecting auth, wait a bit for redirects to settle
+      if (waitForAuth) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
       return true;
     } catch (error) {
       logger.error(`Failed to navigate: ${error.message}`);
@@ -108,6 +118,89 @@ class BaseScraper {
     return videos;
   }
 
+  async captureVideoUrlsFromNetwork(timeout = 30000) {
+    const videoUrls = [];
+    const startTime = Date.now();
+
+    logger.info('Monitoring network for video URLs...');
+
+    // Set up network request listener
+    const requestListener = async (request) => {
+      const url = request.url();
+
+      // Check for video-related URLs
+      if (url.includes('.m3u8') ||
+          url.includes('.mpd') ||
+          url.includes('/manifest/') ||
+          url.includes('video') && (url.includes('.mp4') || url.includes('.ts'))) {
+
+        logger.info(`Found video URL: ${url.substring(0, 100)}...`);
+        videoUrls.push({
+          url,
+          type: url.includes('.m3u8') ? 'hls' : url.includes('.mpd') ? 'dash' : 'direct'
+        });
+      }
+    };
+
+    const responseListener = async (response) => {
+      const url = response.url();
+      const contentType = response.headers()['content-type'] || '';
+
+      // Check for video content in responses
+      if (contentType.includes('application/vnd.apple.mpegurl') ||
+          contentType.includes('application/x-mpegURL') ||
+          contentType.includes('video/') ||
+          contentType.includes('application/dash+xml')) {
+
+        logger.info(`Found video response: ${url.substring(0, 100)}...`);
+        if (!videoUrls.find(v => v.url === url)) {
+          videoUrls.push({
+            url,
+            type: contentType.includes('mpegurl') || contentType.includes('x-mpegURL') ? 'hls' :
+                  contentType.includes('dash') ? 'dash' : 'direct',
+            contentType
+          });
+        }
+      }
+    };
+
+    this.page.on('request', requestListener);
+    this.page.on('response', responseListener);
+
+    // Wait for video to start loading or timeout
+    logger.info('Waiting for video to load... (this may take up to 30 seconds)');
+
+    // Try to play the video to trigger network requests
+    try {
+      await this.page.evaluate(() => {
+        const video = document.querySelector('video');
+        if (video) {
+          video.play().catch(() => {});
+        }
+      });
+    } catch (error) {
+      logger.warning('Could not auto-play video');
+    }
+
+    // Wait for video URLs to be captured
+    const checkInterval = 1000;
+    while (Date.now() - startTime < timeout && videoUrls.length === 0) {
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+
+    // Remove listeners
+    this.page.off('request', requestListener);
+    this.page.off('response', responseListener);
+
+    if (videoUrls.length > 0) {
+      logger.success(`Captured ${videoUrls.length} video URL(s)`);
+    } else {
+      logger.warning('No video URLs captured from network');
+    }
+
+    return videoUrls;
+  }
+
   async extractDocuments(selectors) {
     const documents = [];
 
@@ -135,20 +228,159 @@ class BaseScraper {
     return documents;
   }
 
+  async debugPageStructure() {
+    logger.info('Analyzing page structure...');
+
+    const pageInfo = await this.page.evaluate(() => {
+      const info = {
+        buttons: [],
+        links: [],
+        videos: [],
+        expandable: []
+      };
+
+      // Find all buttons
+      document.querySelectorAll('button').forEach(btn => {
+        const text = btn.textContent.trim().substring(0, 50);
+        const classes = btn.className;
+        const ariaExpanded = btn.getAttribute('aria-expanded');
+        if (text || ariaExpanded !== null) {
+          info.buttons.push({ text, classes, ariaExpanded });
+        }
+      });
+
+      // Find all links
+      document.querySelectorAll('a[href]').forEach(link => {
+        const href = link.href;
+        const text = link.textContent.trim().substring(0, 50);
+        const classes = link.className;
+        if (href && text && (href.includes('/video') || href.includes('/lesson') || href.includes('/content'))) {
+          info.links.push({ href, text, classes });
+        }
+      });
+
+      // Find videos
+      document.querySelectorAll('video').forEach(video => {
+        info.videos.push({ src: video.src, poster: video.poster });
+      });
+
+      // Find expandable elements
+      document.querySelectorAll('[aria-expanded]').forEach(el => {
+        info.expandable.push({
+          tag: el.tagName,
+          expanded: el.getAttribute('aria-expanded'),
+          classes: el.className,
+          text: el.textContent.trim().substring(0, 30)
+        });
+      });
+
+      return info;
+    });
+
+    logger.info(`Found ${pageInfo.buttons.length} buttons`);
+    logger.info(`Found ${pageInfo.links.length} relevant links`);
+    logger.info(`Found ${pageInfo.videos.length} videos`);
+    logger.info(`Found ${pageInfo.expandable.length} expandable elements`);
+
+    if (pageInfo.expandable.length > 0) {
+      const collapsed = pageInfo.expandable.filter(e => e.expanded === 'false');
+      logger.info(`Found ${collapsed.length} collapsed elements`);
+    }
+
+    return pageInfo;
+  }
+
+  async expandAllSections() {
+    logger.info('Expanding all collapsible sections...');
+
+    try {
+      // First, get page structure for debugging
+      const pageInfo = await this.debugPageStructure();
+
+      const expandedCount = await this.page.evaluate(() => {
+        let count = 0;
+
+        // Common selectors for collapsible sections
+        const expandSelectors = [
+          'button[aria-expanded="false"]',
+          '[aria-expanded="false"]',
+          '.accordion-button.collapsed',
+          '[class*="collapse"]:not([class*="show"])',
+          '[class*="Accordion"]',
+          '[class*="Collaps"]',
+          'details:not([open])',
+          '[role="button"][aria-expanded="false"]',
+          'button[class*="expand"]',
+          'button[class*="Expand"]'
+        ];
+
+        // Try to find and click all expand buttons
+        expandSelectors.forEach(selector => {
+          try {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+              try {
+                // For details elements, set open attribute
+                if (el.tagName === 'DETAILS') {
+                  el.open = true;
+                  count++;
+                } else {
+                  // For buttons/clickable elements
+                  el.click();
+                  count++;
+                }
+              } catch (e) {
+                // Ignore individual click errors
+              }
+            });
+          } catch (e) {
+            // Ignore selector errors
+          }
+        });
+
+        return count;
+      });
+
+      if (expandedCount > 0) {
+        logger.success(`Expanded ${expandedCount} section(s)`);
+        // Wait for content to load after expansion
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } else {
+        logger.info('No collapsible sections found or all already expanded');
+      }
+
+      return expandedCount;
+    } catch (error) {
+      logger.warning(`Failed to expand sections: ${error.message}`);
+      return 0;
+    }
+  }
+
   async extractLessons(selectors) {
     const lessons = [];
 
     try {
+      // First, expand all collapsible sections
+      await this.expandAllSections();
+
       const lessonElements = await this.page.evaluate((sel) => {
         const items = [];
         const links = document.querySelectorAll(sel.lessonList);
+        const seenUrls = new Set();
 
         links.forEach((link, index) => {
-          items.push({
-            index,
-            url: link.href,
-            title: link.textContent.trim()
-          });
+          const url = link.href;
+          const title = link.textContent.trim();
+
+          // Avoid duplicates and empty titles
+          if (url && title && !seenUrls.has(url)) {
+            seenUrls.add(url);
+            items.push({
+              index: items.length,
+              url,
+              title
+            });
+          }
         });
 
         return items;

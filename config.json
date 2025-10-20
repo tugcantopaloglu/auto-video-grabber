@@ -2,7 +2,7 @@
   "downloadPath": "./downloads",
   "maxConcurrentDownloads": 3,
   "retryAttempts": 3,
-  "timeout": 30000,
+  "timeout": 60000,
   "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "websites": {
     "ine.com": {
@@ -15,7 +15,21 @@
         "content": ".lesson-content, .course-content, main"
       },
       "waitForSelector": "video, .video-container",
-      "requiresAuth": true
+      "requiresAuth": true,
+      "useNetworkCapture": true
+    },
+    "my.ine.com": {
+      "selectors": {
+        "courseTitle": "h1, [class*='title'], [class*='Title']",
+        "videoPlayer": "video",
+        "videoSource": "video source, source",
+        "lessonList": "a[href*='/video/'], a[href*='/lesson/'], a[class*='lesson'], a[class*='Lesson'], a[class*='video'], a[class*='Video'], [role='link'][href*='/video/']",
+        "documents": "a[href$='.pdf'], a[href$='.doc'], a[href$='.docx'], a[href$='.zip']",
+        "content": ".lesson-content, .course-content, main"
+      },
+      "waitForSelector": "video, .video-container",
+      "requiresAuth": true,
+      "useNetworkCapture": true
     },
     "default": {
       "selectors": {

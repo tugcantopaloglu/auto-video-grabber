@@ -30,7 +30,7 @@ class CourseDownloader {
       await scraper.initialize();
 
       // Navigate to course page
-      const navigated = await scraper.navigateTo(courseUrl);
+      const navigated = await scraper.navigateTo(courseUrl, websiteConfig.requiresAuth);
       if (!navigated) {
         throw new Error('Failed to navigate to course URL');
       }
@@ -73,9 +73,23 @@ class CourseDownloader {
             await scraper.navigateTo(lesson.url);
 
             // Download video
-            const videos = await scraper.extractVideos(websiteConfig.selectors);
-            if (videos.length > 0 && videos[0].sources.length > 0) {
-              const videoUrl = videos[0].sources[0].src;
+            let videoUrl = null;
+
+            // First try network capture method (for blob URLs)
+            const networkVideos = await scraper.captureVideoUrlsFromNetwork(30000);
+            if (networkVideos.length > 0) {
+              videoUrl = networkVideos[0].url;
+              logger.info(`Using network-captured URL (${networkVideos[0].type})`);
+            } else {
+              // Fallback to DOM extraction
+              const videos = await scraper.extractVideos(websiteConfig.selectors);
+              if (videos.length > 0 && videos[0].sources.length > 0) {
+                videoUrl = videos[0].sources[0].src;
+                logger.info('Using DOM-extracted URL');
+              }
+            }
+
+            if (videoUrl && !videoUrl.startsWith('blob:')) {
               const videoPath = await this.videoDownloader.downloadVideo(
                 videoUrl,
                 path.join(coursePath, 'videos'),
@@ -87,6 +101,8 @@ class CourseDownloader {
                 path: path.relative(coursePath, videoPath),
                 lessonIndex: i
               });
+            } else if (videoUrl && videoUrl.startsWith('blob:')) {
+              logger.warning(`Skipping blob URL - no real video URL found for: ${lesson.title}`);
             }
 
             // Download HTML
@@ -129,9 +145,23 @@ class CourseDownloader {
         logger.info('Processing single page course...');
 
         // Download video
-        const videos = await scraper.extractVideos(websiteConfig.selectors);
-        if (videos.length > 0 && videos[0].sources.length > 0) {
-          const videoUrl = videos[0].sources[0].src;
+        let videoUrl = null;
+
+        // First try network capture method (for blob URLs)
+        const networkVideos = await scraper.captureVideoUrlsFromNetwork(30000);
+        if (networkVideos.length > 0) {
+          videoUrl = networkVideos[0].url;
+          logger.info(`Using network-captured URL (${networkVideos[0].type})`);
+        } else {
+          // Fallback to DOM extraction
+          const videos = await scraper.extractVideos(websiteConfig.selectors);
+          if (videos.length > 0 && videos[0].sources.length > 0) {
+            videoUrl = videos[0].sources[0].src;
+            logger.info('Using DOM-extracted URL');
+          }
+        }
+
+        if (videoUrl && !videoUrl.startsWith('blob:')) {
           const videoPath = await this.videoDownloader.downloadVideo(
             videoUrl,
             path.join(coursePath, 'videos'),
@@ -143,6 +173,8 @@ class CourseDownloader {
             path: path.relative(coursePath, videoPath),
             lessonIndex: 0
           });
+        } else if (videoUrl && videoUrl.startsWith('blob:')) {
+          logger.warning('Skipping blob URL - no real video URL found');
         }
 
         // Download HTML
