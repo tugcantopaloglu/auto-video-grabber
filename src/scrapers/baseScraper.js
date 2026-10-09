@@ -1,10 +1,12 @@
 import puppeteer from 'puppeteer';
-import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { createInterface } from 'node:readline';
 import logger from '../utils/logger.js';
+import { downloadFile, validateHttpUrl } from '../utils/download.js';
 
 class BaseScraper {
   constructor(url, config) {
+    validateHttpUrl(url);
     this.url = url;
     this.config = config;
     this.browser = null;
@@ -14,13 +16,7 @@ class BaseScraper {
   async initialize() {
     logger.info('Launching browser...');
     this.browser = await puppeteer.launch({
-      headless: false, // Set to false to see the browser and handle authentication
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-web-security',
-        '--disable-features=IsolateOrigins,site-per-process'
-      ]
+      headless: false
     });
     this.page = await this.browser.newPage();
 
@@ -29,6 +25,7 @@ class BaseScraper {
   }
 
   async navigateTo(url, waitForAuth = false) {
+    validateHttpUrl(url);
     logger.info(`Navigating to: ${url}`);
     try {
       // Use a more lenient wait strategy for auth-protected pages
@@ -52,14 +49,19 @@ class BaseScraper {
     }
   }
 
-  async waitForAuth() {
+  async waitForAuth(input = process.stdin) {
     logger.warning('Please log in to the website in the browser window...');
     logger.info('Press Enter in the terminal once you are logged in and on the course page...');
 
-    // Wait for user input
-    await new Promise(resolve => {
-      process.stdin.once('data', () => resolve());
-    });
+    const reader = createInterface({ input });
+    try {
+      await new Promise((resolve, reject) => {
+        reader.once('line', resolve);
+        reader.once('close', () => reject(new Error('Authentication input closed before confirmation')));
+      });
+    } finally {
+      reader.close();
+    }
   }
 
   async extractPageContent() {
@@ -127,37 +129,32 @@ class BaseScraper {
     // Set up network request listener
     const requestListener = async (request) => {
       const url = request.url();
+      const pathname = new URL(url).pathname.toLowerCase();
 
       // Check for video-related URLs
-      if (url.includes('.m3u8') ||
-          url.includes('.mpd') ||
-          url.includes('/manifest/') ||
-          url.includes('video') && (url.includes('.mp4') || url.includes('.ts'))) {
+      if (['.m3u8', '.mp4', '.webm'].some(extension => pathname.endsWith(extension))) {
 
         logger.info(`Found video URL: ${url.substring(0, 100)}...`);
-        videoUrls.push({
-          url,
-          type: url.includes('.m3u8') ? 'hls' : url.includes('.mpd') ? 'dash' : 'direct'
-        });
+        if (!videoUrls.some(video => video.url === url)) {
+          videoUrls.push({ url, type: pathname.endsWith('.m3u8') ? 'hls' : 'direct' });
+        }
       }
     };
 
     const responseListener = async (response) => {
       const url = response.url();
-      const contentType = response.headers()['content-type'] || '';
+      const contentType = (response.headers()['content-type'] || '').toLowerCase();
 
       // Check for video content in responses
       if (contentType.includes('application/vnd.apple.mpegurl') ||
-          contentType.includes('application/x-mpegURL') ||
-          contentType.includes('video/') ||
-          contentType.includes('application/dash+xml')) {
+          contentType.includes('application/x-mpegurl') ||
+          (contentType.includes('video/') && !contentType.includes('video/mp2t'))) {
 
         logger.info(`Found video response: ${url.substring(0, 100)}...`);
         if (!videoUrls.find(v => v.url === url)) {
           videoUrls.push({
             url,
-            type: contentType.includes('mpegurl') || contentType.includes('x-mpegURL') ? 'hls' :
-                  contentType.includes('dash') ? 'dash' : 'direct',
+            type: contentType.includes('mpegurl') ? 'hls' : 'direct',
             contentType
           });
         }
@@ -210,10 +207,14 @@ class BaseScraper {
         const links = document.querySelectorAll(sel.documents);
 
         links.forEach(link => {
+          let filename = new URL(link.href).pathname.split('/').pop();
+          try {
+            filename = decodeURIComponent(filename);
+          } catch {}
           docs.push({
             href: link.href,
             text: link.textContent.trim(),
-            filename: link.href.split('/').pop()
+            filename
           });
         });
 
@@ -443,34 +444,7 @@ class BaseScraper {
 
   async downloadFile(url, filePath, onProgress) {
     try {
-      const response = await axios({
-        url,
-        method: 'GET',
-        responseType: 'stream',
-        timeout: this.config.timeout,
-        headers: {
-          'User-Agent': this.config.userAgent
-        }
-      });
-
-      const totalLength = response.headers['content-length'];
-      let downloadedLength = 0;
-
-      const writer = require('fs').createWriteStream(filePath);
-
-      response.data.on('data', (chunk) => {
-        downloadedLength += chunk.length;
-        if (onProgress && totalLength) {
-          const progress = Math.round((downloadedLength / totalLength) * 100);
-          onProgress(progress, downloadedLength, totalLength);
-        }
-      });
-
-      return new Promise((resolve, reject) => {
-        response.data.pipe(writer);
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-      });
+      return await downloadFile(url, filePath, this.config, onProgress);
     } catch (error) {
       throw new Error(`Download failed: ${error.message}`);
     }
@@ -479,6 +453,8 @@ class BaseScraper {
   async close() {
     if (this.browser) {
       await this.browser.close();
+      this.browser = null;
+      this.page = null;
       logger.info('Browser closed');
     }
   }

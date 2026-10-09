@@ -2,19 +2,43 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
+import { Command } from 'commander';
 import logger from './utils/logger.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { escapeHtml } from './utils/html.js';
 
 class OfflineServer {
   constructor(port = 3000, downloadsPath = './downloads') {
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error('Port must be an integer between 0 and 65535');
+    }
     this.port = port;
-    this.downloadsPath = downloadsPath;
+    this.downloadsPath = path.resolve(downloadsPath);
     this.app = express();
+    this.server = null;
+    this.configureRoutes();
   }
 
-  async start() {
+  configureRoutes() {
+    this.app.use(async (req, res, next) => {
+      try {
+        const requestedPath = path.resolve(this.downloadsPath, `.${decodeURIComponent(req.path)}`);
+        if (!this.isWithinDownloads(requestedPath)) return res.sendStatus(404);
+        if (await fs.pathExists(requestedPath)) {
+          const realDownloadsPath = await fs.realpath(this.downloadsPath);
+          const resolvedPath = await fs.realpath(requestedPath);
+          if (!this.isWithinDownloads(resolvedPath, realDownloadsPath)) return res.sendStatus(404);
+          if ((await fs.stat(resolvedPath)).isDirectory()) {
+            const indexPath = path.join(resolvedPath, 'index.html');
+            if (await fs.pathExists(indexPath) && !this.isWithinDownloads(await fs.realpath(indexPath), realDownloadsPath)) {
+              return res.sendStatus(404);
+            }
+          }
+        }
+        next();
+      } catch (error) {
+        res.status(400).json({ error: 'Invalid resource path' });
+      }
+    });
     // Serve static files from downloads directory
     this.app.use(express.static(this.downloadsPath));
 
@@ -32,11 +56,8 @@ class OfflineServer {
     this.app.get('/api/course/:website/:courseName', async (req, res) => {
       try {
         const { website, courseName } = req.params;
-        const coursePath = path.join(this.downloadsPath, website, courseName);
-        const manifestPath = path.join(coursePath, 'manifest.json');
-
-        if (await fs.pathExists(manifestPath)) {
-          const manifest = await fs.readJson(manifestPath);
+        const manifest = await this.readCourseManifest(website, courseName);
+        if (manifest) {
           res.json(manifest);
         } else {
           res.status(404).json({ error: 'Course not found' });
@@ -48,15 +69,57 @@ class OfflineServer {
 
     // Main page
     this.app.get('/', async (req, res) => {
-      const courses = await this.getAvailableCourses();
-      const html = this.generateMainPage(courses);
-      res.send(html);
+      try {
+        const courses = await this.getAvailableCourses();
+        const html = this.generateMainPage(courses);
+        res.send(html);
+      } catch (error) {
+        res.status(500).json({ error: 'Could not read the course library' });
+      }
     });
+  }
 
-    this.app.listen(this.port, () => {
-      logger.success(`Offline server running at http://localhost:${this.port}`);
-      logger.info('Access your downloaded courses from the browser');
+  isWithinDownloads(target, root = this.downloadsPath) {
+    const relative = path.relative(root, target);
+    return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+  }
+
+  async readCourseManifest(website, courseName) {
+    if ([website, courseName].some(segment => !segment || segment === '.' || segment === '..' || /[\\/:]/.test(segment))) {
+      return null;
+    }
+    const manifestPath = path.join(this.downloadsPath, website, courseName, 'manifest.json');
+    if (!await fs.pathExists(manifestPath)) return null;
+    if (!this.isWithinDownloads(await fs.realpath(manifestPath), await fs.realpath(this.downloadsPath))) return null;
+    const manifest = await fs.readJson(manifestPath);
+    if (![manifest.lessons, manifest.videos, manifest.documents].every(Array.isArray)) {
+      throw new Error('Invalid course manifest');
+    }
+    return manifest;
+  }
+
+  async start() {
+    if (this.server) throw new Error('Server is already running');
+    await new Promise((resolve, reject) => {
+      const server = this.app.listen(this.port, '127.0.0.1');
+      this.server = server;
+      server.once('error', error => {
+        this.server = null;
+        reject(error);
+      });
+      server.once('listening', resolve);
     });
+    this.port = this.server.address().port;
+    logger.success(`Offline server running at http://localhost:${this.port}`);
+    logger.info('Access your downloaded courses from the browser');
+    return this.server;
+  }
+
+  async stop() {
+    if (!this.server) return;
+    const server = this.server;
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    this.server = null;
   }
 
   async getAvailableCourses() {
@@ -73,11 +136,9 @@ class OfflineServer {
           const courseFolders = await fs.readdir(websitePath);
 
           for (const courseFolder of courseFolders) {
-            const coursePath = path.join(websitePath, courseFolder);
-            const manifestPath = path.join(coursePath, 'manifest.json');
-
-            if (await fs.pathExists(manifestPath)) {
-              const manifest = await fs.readJson(manifestPath);
+            try {
+              const manifest = await this.readCourseManifest(website, courseFolder);
+              if (!manifest) continue;
               courses.push({
                 website,
                 folder: courseFolder,
@@ -89,8 +150,10 @@ class OfflineServer {
                   videos: manifest.videos.length,
                   documents: manifest.documents.length
                 },
-                path: `/${website}/${courseFolder}/index.html`
+                path: `/${encodeURIComponent(website)}/${encodeURIComponent(courseFolder)}/index.html`
               });
+            } catch (error) {
+              logger.warning(`Skipping invalid course manifest: ${website}/${courseFolder}`);
             }
           }
         }
@@ -249,7 +312,7 @@ class OfflineServer {
 <body>
   <div class="container">
     <div class="header">
-      <h1>📚 Offline Course Library</h1>
+      <h1>Offline Course Library</h1>
       <p>Your Downloaded Educational Content</p>
     </div>
 
@@ -258,8 +321,8 @@ class OfflineServer {
         ${courses.map(course => `
           <div class="course-card">
             <div class="course-header">
-              <span class="course-website">${course.website}</span>
-              <h2 class="course-title">${course.title}</h2>
+              <span class="course-website">${escapeHtml(course.website)}</span>
+              <h2 class="course-title">${escapeHtml(course.title)}</h2>
               <p class="course-date">Downloaded: ${new Date(course.downloadDate).toLocaleDateString()}</p>
             </div>
 
@@ -278,7 +341,7 @@ class OfflineServer {
               </div>
             </div>
 
-            <a href="${course.path}" class="course-link">Open Course</a>
+            <a href="${escapeHtml(course.path)}" class="course-link">Open Course</a>
           </div>
         `).join('')}
       </div>
@@ -300,9 +363,19 @@ class OfflineServer {
 }
 
 // Start server if run directly
-if (import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}`) {
-  const server = new OfflineServer(3000, './downloads');
-  server.start();
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  const program = new Command();
+  program.option('-p, --port <number>', 'Port number', '3000');
+  program.option('-d, --dir <path>', 'Downloads directory', './downloads');
+  program.parse();
+  const options = program.opts();
+  try {
+    const server = new OfflineServer(Number(options.port), options.dir);
+    await server.start();
+  } catch (error) {
+    logger.error(`Failed to start server: ${error.message}`);
+    process.exitCode = 1;
+  }
 }
 
 export default OfflineServer;

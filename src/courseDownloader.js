@@ -6,6 +6,8 @@ import HtmlDownloader from './downloaders/htmlDownloader.js';
 import DocumentDownloader from './downloaders/documentDownloader.js';
 import FileManager from './utils/fileManager.js';
 import logger from './utils/logger.js';
+import { validateHttpUrl } from './utils/download.js';
+import { localUrlPath } from './utils/html.js';
 
 class CourseDownloader {
   constructor(config) {
@@ -17,6 +19,7 @@ class CourseDownloader {
   }
 
   async download(courseUrl, websiteName = null) {
+    validateHttpUrl(courseUrl);
     const website = websiteName || this.extractWebsiteName(courseUrl);
     const websiteConfig = this.config.websites[website] || this.config.websites.default;
 
@@ -60,7 +63,8 @@ class CourseDownloader {
         downloadDate: new Date().toISOString(),
         lessons: [],
         videos: [],
-        documents: []
+        documents: [],
+        failures: []
       };
 
       // If lessons exist, download each lesson
@@ -70,15 +74,21 @@ class CourseDownloader {
           logger.info(`\nProcessing lesson ${i + 1}/${lessons.length}: ${lesson.title}`);
 
           try {
-            await scraper.navigateTo(lesson.url);
+            if (!await scraper.navigateTo(lesson.url)) {
+              throw new Error('Failed to navigate to lesson URL');
+            }
+            const resources = new Map();
+            let localVideo = null;
 
             // Download video
             let videoUrl = null;
+            let videoFormat = null;
 
             // First try network capture method (for blob URLs)
             const networkVideos = await scraper.captureVideoUrlsFromNetwork(30000);
             if (networkVideos.length > 0) {
               videoUrl = networkVideos[0].url;
+              videoFormat = networkVideos[0].type;
               logger.info(`Using network-captured URL (${networkVideos[0].type})`);
             } else {
               // Fallback to DOM extraction
@@ -93,29 +103,27 @@ class CourseDownloader {
               const videoPath = await this.videoDownloader.downloadVideo(
                 videoUrl,
                 path.join(coursePath, 'videos'),
-                `${i + 1}_${lesson.title}`
+                `${i + 1}_${lesson.title}`,
+                undefined,
+                videoFormat
               );
 
               manifest.videos.push({
                 title: lesson.title,
-                path: path.relative(coursePath, videoPath),
+                path: path.relative(coursePath, videoPath).split(path.sep).join('/'),
                 lessonIndex: i
               });
+              localVideo = `../${localUrlPath(path.relative(coursePath, videoPath))}`;
+              resources.set(videoUrl, localVideo);
             } else if (videoUrl && videoUrl.startsWith('blob:')) {
               logger.warning(`Skipping blob URL - no real video URL found for: ${lesson.title}`);
             }
 
-            // Download HTML
-            const htmlPath = await this.htmlDownloader.savePageHtml(
-              scraper.page,
-              path.join(coursePath, 'html'),
-              `${i + 1}_${lesson.title}`
-            );
-
             // Download images
             await this.htmlDownloader.downloadImages(
               scraper.page,
-              path.join(coursePath, 'html')
+              path.join(coursePath, 'html'),
+              resources
             );
 
             // Extract and download documents
@@ -123,21 +131,32 @@ class CourseDownloader {
             if (docs.length > 0) {
               const downloadedDocs = await this.documentDownloader.downloadDocuments(
                 docs,
-                coursePath
+                coursePath,
+                (doc, error) => manifest.failures.push({ url: doc.href, message: error.message })
               );
               manifest.documents.push(...downloadedDocs);
+              downloadedDocs.forEach(doc => resources.set(doc.originalUrl, `../${localUrlPath(doc.path)}`));
             }
+
+            const htmlPath = await this.htmlDownloader.savePageHtml(
+              scraper.page,
+              path.join(coursePath, 'html'),
+              `${i + 1}_${lesson.title}`,
+              resources,
+              localVideo
+            );
 
             manifest.lessons.push({
               index: i,
               title: lesson.title,
               url: lesson.url,
-              htmlPath: path.relative(coursePath, htmlPath)
+              htmlPath: path.relative(coursePath, htmlPath).split(path.sep).join('/')
             });
 
             logger.progress(i + 1, lessons.length, lesson.title);
           } catch (error) {
             logger.error(`Failed to download lesson ${lesson.title}: ${error.message}`);
+            manifest.failures.push({ title: lesson.title, url: lesson.url, message: error.message });
           }
         }
       } else {
@@ -146,11 +165,15 @@ class CourseDownloader {
 
         // Download video
         let videoUrl = null;
+        let videoFormat = null;
+        const resources = new Map();
+        let localVideo = null;
 
         // First try network capture method (for blob URLs)
         const networkVideos = await scraper.captureVideoUrlsFromNetwork(30000);
         if (networkVideos.length > 0) {
           videoUrl = networkVideos[0].url;
+          videoFormat = networkVideos[0].type;
           logger.info(`Using network-captured URL (${networkVideos[0].type})`);
         } else {
           // Fallback to DOM extraction
@@ -165,29 +188,27 @@ class CourseDownloader {
           const videoPath = await this.videoDownloader.downloadVideo(
             videoUrl,
             path.join(coursePath, 'videos'),
-            courseTitle
+            courseTitle,
+            undefined,
+            videoFormat
           );
 
           manifest.videos.push({
             title: courseTitle,
-            path: path.relative(coursePath, videoPath),
+            path: path.relative(coursePath, videoPath).split(path.sep).join('/'),
             lessonIndex: 0
           });
+          localVideo = `../${localUrlPath(path.relative(coursePath, videoPath))}`;
+          resources.set(videoUrl, localVideo);
         } else if (videoUrl && videoUrl.startsWith('blob:')) {
           logger.warning('Skipping blob URL - no real video URL found');
         }
 
-        // Download HTML
-        const htmlPath = await this.htmlDownloader.savePageHtml(
-          scraper.page,
-          path.join(coursePath, 'html'),
-          courseTitle
-        );
-
         // Download images
         await this.htmlDownloader.downloadImages(
           scraper.page,
-          path.join(coursePath, 'html')
+          path.join(coursePath, 'html'),
+          resources
         );
 
         // Extract and download documents
@@ -195,16 +216,26 @@ class CourseDownloader {
         if (docs.length > 0) {
           const downloadedDocs = await this.documentDownloader.downloadDocuments(
             docs,
-            coursePath
+            coursePath,
+            (doc, error) => manifest.failures.push({ url: doc.href, message: error.message })
           );
           manifest.documents.push(...downloadedDocs);
+          downloadedDocs.forEach(doc => resources.set(doc.originalUrl, `../${localUrlPath(doc.path)}`));
         }
+
+        const htmlPath = await this.htmlDownloader.savePageHtml(
+          scraper.page,
+          path.join(coursePath, 'html'),
+          courseTitle,
+          resources,
+          localVideo
+        );
 
         manifest.lessons.push({
           index: 0,
           title: courseTitle,
           url: courseUrl,
-          htmlPath: path.relative(coursePath, htmlPath)
+          htmlPath: path.relative(coursePath, htmlPath).split(path.sep).join('/')
         });
       }
 
@@ -214,14 +245,18 @@ class CourseDownloader {
       // Create index page
       await this.htmlDownloader.createIndexPage(coursePath, manifest);
 
-      logger.success('\n✓ Download completed successfully!');
+      if (manifest.failures.length > 0) {
+        logger.warning(`Download completed with ${manifest.failures.length} failure(s)`);
+      } else {
+        logger.success('\nDownload completed successfully!');
+      }
       logger.info(`Course saved to: ${coursePath}`);
       logger.info(`Videos: ${manifest.videos.length}`);
       logger.info(`Documents: ${manifest.documents.length}`);
       logger.info(`Lessons: ${manifest.lessons.length}`);
 
       return {
-        success: true,
+        success: manifest.failures.length === 0,
         coursePath,
         manifest
       };

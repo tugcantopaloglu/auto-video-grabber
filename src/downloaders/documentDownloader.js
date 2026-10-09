@@ -1,7 +1,7 @@
-import axios from 'axios';
 import path from 'path';
 import logger from '../utils/logger.js';
 import FileManager from '../utils/fileManager.js';
+import { downloadFile, validateHttpUrl, urlFilename } from '../utils/download.js';
 
 class DocumentDownloader {
   constructor(config) {
@@ -10,7 +10,8 @@ class DocumentDownloader {
   }
 
   async downloadDocument(docUrl, outputPath, filename = null) {
-    const finalFilename = filename || docUrl.split('/').pop().split('?')[0];
+    validateHttpUrl(docUrl);
+    const finalFilename = filename || urlFilename(docUrl);
     const sanitizedFilename = this.fileManager.sanitizeFilename(finalFilename);
     const docFilePath = path.join(outputPath, sanitizedFilename);
 
@@ -22,18 +23,7 @@ class DocumentDownloader {
     logger.startSpinner(`Downloading document: ${sanitizedFilename}`);
 
     try {
-      const response = await axios({
-        url: docUrl,
-        method: 'GET',
-        responseType: 'arraybuffer',
-        timeout: this.config.timeout,
-        headers: {
-          'User-Agent': this.config.userAgent,
-          'Referer': docUrl
-        }
-      });
-
-      await this.fileManager.saveFile(docFilePath, response.data, true);
+      await downloadFile(docUrl, docFilePath, this.config, undefined, { Referer: docUrl });
 
       const fileSize = await this.fileManager.getFileSize(docFilePath);
       logger.stopSpinner(true, `Downloaded: ${sanitizedFilename} (${this.fileManager.formatBytes(fileSize)})`);
@@ -45,7 +35,7 @@ class DocumentDownloader {
     }
   }
 
-  async downloadDocuments(documentList, outputPath) {
+  async downloadDocuments(documentList, outputPath, onError) {
     const documentsDir = path.join(outputPath, 'documents');
     await this.fileManager.ensureDir(documentsDir);
 
@@ -68,8 +58,8 @@ class DocumentDownloader {
         );
 
         downloadedDocs.push({
-          filename: doc.filename,
-          path: path.relative(outputPath, docPath),
+          filename: path.basename(docPath),
+          path: path.relative(outputPath, docPath).split(path.sep).join('/'),
           originalUrl: doc.href,
           size: await this.fileManager.getFileSize(docPath)
         });
@@ -77,6 +67,7 @@ class DocumentDownloader {
         logger.progress(i + 1, documentList.length, doc.filename);
       } catch (error) {
         logger.error(`Failed to download ${documentList[i].filename}: ${error.message}`);
+        if (onError) onError(documentList[i], error);
       }
     }
 

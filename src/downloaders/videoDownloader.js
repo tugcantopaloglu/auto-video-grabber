@@ -1,10 +1,11 @@
-import fs from 'fs';
+import fs from 'fs-extra';
 import path from 'path';
-import axios from 'axios';
+import { randomUUID } from 'node:crypto';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import logger from '../utils/logger.js';
 import FileManager from '../utils/fileManager.js';
+import { downloadFile, validateHttpUrl } from '../utils/download.js';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
@@ -14,7 +15,8 @@ class VideoDownloader {
     this.fileManager = new FileManager(config.downloadPath);
   }
 
-  async downloadVideo(videoUrl, outputPath, videoTitle = 'video', onProgress) {
+  async downloadVideo(videoUrl, outputPath, videoTitle = 'video', onProgress, format = null) {
+    const url = validateHttpUrl(videoUrl);
     const sanitizedTitle = this.fileManager.sanitizeFilename(videoTitle);
     const videoFilePath = path.join(outputPath, `${sanitizedTitle}.mp4`);
 
@@ -25,7 +27,7 @@ class VideoDownloader {
 
     try {
       // Check if it's an m3u8 playlist
-      if (videoUrl.includes('.m3u8')) {
+      if (format === 'hls' || url.pathname.toLowerCase().endsWith('.m3u8')) {
         return await this.downloadHLS(videoUrl, videoFilePath, onProgress);
       } else {
         return await this.downloadDirect(videoUrl, videoFilePath, onProgress);
@@ -40,38 +42,12 @@ class VideoDownloader {
     logger.startSpinner(`Downloading video to ${path.basename(outputPath)}`);
 
     try {
-      const response = await axios({
-        url: videoUrl,
-        method: 'GET',
-        responseType: 'stream',
-        timeout: this.config.timeout,
-        headers: {
-          'User-Agent': this.config.userAgent,
-          'Referer': videoUrl
-        }
-      });
-
-      const totalLength = parseInt(response.headers['content-length'], 10);
-      let downloadedLength = 0;
-
-      const writer = fs.createWriteStream(outputPath);
-
-      response.data.on('data', (chunk) => {
-        downloadedLength += chunk.length;
-        if (onProgress && totalLength) {
-          const progress = Math.round((downloadedLength / totalLength) * 100);
-          logger.updateSpinner(
-            `Downloading: ${progress}% (${this.fileManager.formatBytes(downloadedLength)}/${this.fileManager.formatBytes(totalLength)})`
-          );
-          onProgress(progress, downloadedLength, totalLength);
-        }
-      });
-
-      await new Promise((resolve, reject) => {
-        response.data.pipe(writer);
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-      });
+      await downloadFile(videoUrl, outputPath, this.config, (progress, downloadedLength, totalLength) => {
+        logger.updateSpinner(
+          `Downloading: ${progress}% (${this.fileManager.formatBytes(downloadedLength)}/${this.fileManager.formatBytes(totalLength)})`
+        );
+        if (onProgress) onProgress(progress, downloadedLength, totalLength);
+      }, { Referer: videoUrl });
 
       logger.stopSpinner(true, `Downloaded: ${path.basename(outputPath)}`);
       return outputPath;
@@ -82,37 +58,43 @@ class VideoDownloader {
   }
 
   async downloadHLS(m3u8Url, outputPath, onProgress) {
+    validateHttpUrl(m3u8Url);
+    await this.fileManager.ensureDir(path.dirname(outputPath));
+    const temporaryPath = `${outputPath}.${randomUUID()}.tmp.mp4`;
     logger.startSpinner(`Downloading HLS stream to ${path.basename(outputPath)}`);
 
-    return new Promise((resolve, reject) => {
-      const command = ffmpeg(m3u8Url)
-        .outputOptions([
-          '-c copy',
-          '-bsf:a aac_adtstoasc'
-        ])
-        .output(outputPath)
-        .on('start', (commandLine) => {
-          logger.info(`FFmpeg command: ${commandLine}`);
-        })
-        .on('progress', (progress) => {
-          if (progress.percent) {
-            logger.updateSpinner(`Downloading HLS: ${Math.round(progress.percent)}%`);
-            if (onProgress) {
-              onProgress(Math.round(progress.percent), 0, 100);
+    try {
+      await new Promise((resolve, reject) => {
+        const command = ffmpeg(m3u8Url)
+          .outputOptions([
+            '-c copy',
+            '-bsf:a aac_adtstoasc'
+          ])
+          .output(temporaryPath)
+          .on('progress', (progress) => {
+            if (progress.percent) {
+              logger.updateSpinner(`Downloading HLS: ${Math.round(progress.percent)}%`);
+              if (onProgress) {
+                onProgress(Math.round(progress.percent), 0, 100);
+              }
             }
-          }
-        })
-        .on('end', () => {
-          logger.stopSpinner(true, `Downloaded HLS stream: ${path.basename(outputPath)}`);
-          resolve(outputPath);
-        })
-        .on('error', (error) => {
-          logger.stopSpinner(false, `Failed to download HLS: ${error.message}`);
-          reject(error);
-        });
-
-      command.run();
-    });
+          })
+          .on('end', resolve)
+          .on('error', reject);
+        command.run();
+      });
+      if (!await this.fileManager.fileExists(temporaryPath)) {
+        throw new Error('The downloaded HLS file is empty');
+      }
+      await fs.rename(temporaryPath, outputPath);
+      logger.stopSpinner(true, `Downloaded HLS stream: ${path.basename(outputPath)}`);
+      return outputPath;
+    } catch (error) {
+      logger.stopSpinner(false, `Failed to download HLS: ${error.message}`);
+      throw error;
+    } finally {
+      await fs.remove(temporaryPath);
+    }
   }
 
   async downloadVideoFromPage(page, selectors, outputPath, videoTitle) {

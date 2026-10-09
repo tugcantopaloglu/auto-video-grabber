@@ -1,10 +1,6 @@
 import fs from 'fs-extra';
 import path from 'path';
 import sanitize from 'sanitize-filename';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 class FileManager {
   constructor(basePath) {
@@ -12,7 +8,11 @@ class FileManager {
   }
 
   sanitizeFilename(filename) {
-    return sanitize(filename.replace(/[<>:"/\\|?*]/g, '-').substring(0, 200));
+    const result = sanitize(String(filename ?? '').replace(/[<>:"/\\|?*]/g, '-').substring(0, 200));
+    if (!result) {
+      throw new Error('A filename must contain a usable character');
+    }
+    return result;
   }
 
   async ensureDir(dirPath) {
@@ -42,8 +42,8 @@ class FileManager {
 
   async fileExists(filePath) {
     try {
-      await fs.access(filePath);
-      return true;
+      const stats = await fs.stat(filePath);
+      return stats.isFile() && stats.size > 0;
     } catch {
       return false;
     }

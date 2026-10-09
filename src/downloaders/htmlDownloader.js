@@ -1,8 +1,10 @@
 import * as cheerio from 'cheerio';
 import path from 'path';
-import axios from 'axios';
+import { createHash } from 'node:crypto';
 import logger from '../utils/logger.js';
 import FileManager from '../utils/fileManager.js';
+import { downloadFile } from '../utils/download.js';
+import { escapeHtml, localUrlPath } from '../utils/html.js';
 
 class HtmlDownloader {
   constructor(config) {
@@ -10,13 +12,13 @@ class HtmlDownloader {
     this.fileManager = new FileManager(config.downloadPath);
   }
 
-  async savePageHtml(page, outputPath, pageTitle = 'page') {
+  async savePageHtml(page, outputPath, pageTitle = 'page', resources = new Map(), localVideo = null) {
     const sanitizedTitle = this.fileManager.sanitizeFilename(pageTitle);
     const htmlFilePath = path.join(outputPath, `${sanitizedTitle}.html`);
 
     try {
       const html = await page.content();
-      const processedHtml = await this.processHtml(html, page.url());
+      const processedHtml = await this.processHtml(html, page.url(), resources, localVideo);
 
       await this.fileManager.saveFile(htmlFilePath, processedHtml);
       logger.success(`Saved HTML: ${sanitizedTitle}.html`);
@@ -28,46 +30,32 @@ class HtmlDownloader {
     }
   }
 
-  async processHtml(html, baseUrl) {
+  async processHtml(html, baseUrl, resources = new Map(), localVideo = null) {
     const $ = cheerio.load(html);
-
-    // Replace video sources with local paths
-    $('video source').each((i, elem) => {
-      const src = $(elem).attr('src');
-      if (src) {
-        const filename = src.split('/').pop().split('?')[0];
-        $(elem).attr('src', `../videos/${filename}`);
+    const documentBase = new URL($('base[href]').first().attr('href') || baseUrl, baseUrl).href;
+    $('base').remove();
+    $('[src], a[href], link[href], video[poster]').each((i, elem) => {
+      for (const attribute of ['src', 'href', 'poster']) {
+        const value = $(elem).attr(attribute);
+        if (!value || value.startsWith('#')) continue;
+        try {
+          const absoluteUrl = new URL(value, documentBase).href;
+          $(elem).attr(attribute, resources.get(absoluteUrl) || absoluteUrl);
+        } catch {
+          $(elem).removeAttr(attribute);
+        }
       }
     });
-
-    $('video').each((i, elem) => {
-      const src = $(elem).attr('src');
-      if (src) {
-        const filename = src.split('/').pop().split('?')[0];
-        $(elem).attr('src', `../videos/${filename}`);
-      }
-    });
-
-    // Replace document links with local paths
-    $('a[href$=".pdf"], a[href$=".doc"], a[href$=".docx"], a[href$=".zip"]').each((i, elem) => {
-      const href = $(elem).attr('href');
-      if (href) {
-        const filename = href.split('/').pop().split('?')[0];
-        $(elem).attr('href', `../documents/${filename}`);
-      }
-    });
-
-    // Download and replace images with local paths
+    if (localVideo) {
+      const video = $('video').first();
+      video.attr('src', localVideo).attr('controls', '');
+      video.find('source').remove();
+    }
     $('img').each((i, elem) => {
-      const src = $(elem).attr('src');
-      if (src && src.startsWith('http')) {
-        const filename = src.split('/').pop().split('?')[0] || `image_${i}.jpg`;
-        $(elem).attr('src', `../images/${filename}`);
+      if (String($(elem).attr('src')).startsWith('images/')) {
+        $(elem).removeAttr('srcset');
       }
     });
-
-    // Add base tag for relative URLs
-    $('head').prepend(`<base href="${baseUrl}">`);
 
     // Add custom CSS for better offline viewing
     $('head').append(`
@@ -93,7 +81,7 @@ class HtmlDownloader {
     return $.html();
   }
 
-  async downloadImages(page, outputPath) {
+  async downloadImages(page, outputPath, resources = new Map()) {
     const imagesDir = path.join(outputPath, 'images');
     await this.fileManager.ensureDir(imagesDir);
 
@@ -110,34 +98,26 @@ class HtmlDownloader {
 
       logger.info(`Found ${images.length} images to download`);
 
+      let downloaded = 0;
       for (let i = 0; i < images.length; i++) {
         try {
           const imageUrl = images[i];
-          const filename = imageUrl.split('/').pop().split('?')[0] || `image_${i}.jpg`;
+          const basename = new URL(imageUrl).pathname.split('/').pop() || 'image';
+          const filename = `${createHash('sha256').update(imageUrl).digest('hex').slice(0, 16)}_${this.fileManager.sanitizeFilename(basename)}`;
           const imagePath = path.join(imagesDir, filename);
 
-          if (await this.fileManager.fileExists(imagePath)) {
-            continue;
+          if (!await this.fileManager.fileExists(imagePath)) {
+            await downloadFile(imageUrl, imagePath, this.config);
+            logger.info(`Downloaded image: ${filename}`);
           }
-
-          const response = await axios({
-            url: imageUrl,
-            method: 'GET',
-            responseType: 'arraybuffer',
-            timeout: this.config.timeout,
-            headers: {
-              'User-Agent': this.config.userAgent
-            }
-          });
-
-          await this.fileManager.saveFile(imagePath, response.data, true);
-          logger.info(`Downloaded image: ${filename}`);
+          resources.set(imageUrl, `images/${localUrlPath(filename)}`);
+          downloaded++;
         } catch (error) {
           logger.warning(`Failed to download image: ${error.message}`);
         }
       }
 
-      return images.length;
+      return downloaded;
     } catch (error) {
       logger.error(`Failed to download images: ${error.message}`);
       return 0;
@@ -153,7 +133,7 @@ class HtmlDownloader {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${manifest.courseTitle} - Offline Course</title>
+  <title>${escapeHtml(manifest.courseTitle)} - Offline Course</title>
   <style>
     * {
       margin: 0;
@@ -291,7 +271,7 @@ class HtmlDownloader {
 </head>
 <body>
   <div class="header">
-    <h1>${manifest.courseTitle}</h1>
+    <h1>${escapeHtml(manifest.courseTitle)}</h1>
     <p>Offline Course Material - Downloaded on ${new Date(manifest.downloadDate).toLocaleDateString()}</p>
   </div>
 
@@ -317,9 +297,9 @@ class HtmlDownloader {
       <ul class="lesson-list">
         ${manifest.lessons.map((lesson, index) => `
           <li class="lesson-item">
-            <a href="${lesson.htmlPath}" class="lesson-link">
+            <a href="${escapeHtml(localUrlPath(lesson.htmlPath))}" class="lesson-link">
               <span class="lesson-number">${index + 1}</span>
-              <span>${lesson.title}</span>
+              <span>${escapeHtml(lesson.title)}</span>
             </a>
           </li>
         `).join('')}
@@ -333,7 +313,7 @@ class HtmlDownloader {
       <div class="doc-list">
         ${manifest.documents.map(doc => `
           <div class="doc-card">
-            <a href="${doc.path}" class="doc-link">${doc.filename}</a>
+            <a href="${escapeHtml(localUrlPath(doc.path))}" class="doc-link">${escapeHtml(doc.filename)}</a>
           </div>
         `).join('')}
       </div>

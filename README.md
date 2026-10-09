@@ -1,233 +1,116 @@
 # Auto Video Grabber
 
-A powerful automation tool for downloading educational content from various websites for offline learning. Download videos, HTML content, documents, and navigate through courses offline.
-
-## Features
-
-- **Video Downloads**: Support for MP4 and HLS streaming formats
-- **HTML Content**: Save complete web pages with local resource linking
-- **Documents**: Download PDFs, Office documents, and archives
-- **Offline Navigation**: Beautiful web interface for browsing downloaded courses
-- **Multi-site Support**: Configurable selectors for different websites
-- **Progress Tracking**: Real-time download progress and status updates
-- **Resume Support**: Skip already downloaded files
+A Node.js CLI for saving videos, documents, and lesson HTML from educational websites, with a local course library viewer. It uses Puppeteer for page inspection, HTTP requests for direct assets, and FFmpeg for HLS playlists.
 
 ## Installation
 
-```bash
-npm install
-```
-
-## Quick Start
-
-### Download a Course
+Use Node.js 22 or newer and install the locked dependencies:
 
 ```bash
-npm start download <course-url>
+npm ci
 ```
 
-Example:
+The normal installation downloads Puppeteer's browser and the `ffmpeg-static` binary. Browser launch also requires the operating system dependencies needed by Chrome. Run commands from the project directory so the CLI can read `config.json`.
+
+## Download a course
+
 ```bash
-npm start download https://ine.com/learning/courses/your-course
+npm start -- download https://example.com/course
+npm start -- download https://example.com/course --website example.com --output ./downloads
 ```
 
-### View Downloaded Courses
+Only HTTP and HTTPS URLs are supported. The optional website name selects an entry in `config.json`; otherwise the hostname is used, with the leading `www.` removed. Unconfigured websites use the `default` selectors.
 
-Start the offline server:
+The download command extracts lesson links, then visits each lesson in sequence. It saves available video, documents, images, and HTML, followed by a manifest and course index. A page with no lesson links is processed as a single lesson.
+
+New direct and HLS downloads use temporary files and publish their final paths after successful completion. Non-empty files already at the expected path are skipped. Existing files are not checked for media validity, so remove a known damaged file before retrying. Failed lessons and document downloads are recorded in the manifest's `failures` array; a partial download exits with a nonzero status.
+
+## Browse and list courses
+
 ```bash
 npm run serve
+npm run serve -- --port 3001 --dir ./downloads
+npm start -- serve --port 3001 --dir ./downloads
+npm start -- list --dir ./downloads
 ```
 
-Then open your browser to `http://localhost:3000`
+Open the URL printed by the server. The viewer binds to `127.0.0.1`, so it is accessible from the same computer. The server and list commands default to `./downloads`; pass `--dir` when a course was downloaded to another location.
 
-### List Downloaded Courses
-
-```bash
-npm start list
-```
-
-## Usage
-
-### Download Command
-
-```bash
-npm start download <url> [options]
-
-Options:
-  -w, --website <name>   Specify website name (e.g., ine.com)
-  -o, --output <path>    Custom output directory
-```
-
-### Serve Command
-
-```bash
-npm run serve [options]
-
-Options:
-  -p, --port <number>    Port number (default: 3000)
-  -d, --dir <path>       Downloads directory (default: ./downloads)
-```
-
-### List Command
-
-```bash
-npm start list [options]
-
-Options:
-  -d, --dir <path>       Downloads directory (default: ./downloads)
-```
-
-### Config Command
-
-```bash
-npm start config
-```
+Saved HTML links use the actual local video, document, and image paths. Stylesheets, scripts, other links, and failed image downloads can still reference the original website. This is a content archive rather than a complete offline copy of an interactive web application. Course and lesson text is escaped in generated library/index pages; archived source pages can retain their original scripts.
 
 ## Configuration
 
-Edit `config.json` to customize settings:
+```bash
+npm start -- config
+npm start -- debug https://example.com/course
+```
+
+`config` prints the effective configuration. `debug` opens a browser, inspects page links and expandable sections, and writes `debug-page-structure.json` in the current directory. It does not download a course.
+
+Edit the project `config.json` to configure `downloadPath`, the HTTP `timeout` in milliseconds, `userAgent`, and website selectors:
 
 ```json
 {
   "downloadPath": "./downloads",
-  "maxConcurrentDownloads": 3,
-  "retryAttempts": 3,
-  "timeout": 30000,
+  "timeout": 60000,
+  "userAgent": "Mozilla/5.0",
   "websites": {
-    "ine.com": {
+    "example.com": {
       "selectors": {
-        "courseTitle": "h1.course-title",
+        "courseTitle": "h1",
         "videoPlayer": "video",
-        "lessonList": "a.lesson-item"
+        "videoSource": "video source",
+        "lessonList": "a.lesson",
+        "documents": "a[href$='.pdf']",
+        "content": "main"
       },
-      "requiresAuth": true
+      "requiresAuth": false
+    },
+    "default": {
+      "selectors": {
+        "videoPlayer": "video",
+        "documents": "a[href$='.pdf']"
+      },
+      "requiresAuth": false
     }
   }
 }
 ```
 
-### Website Configuration
+The `courseTitle`, `videoPlayer`, `lessonList`, and `documents` selectors drive extraction. The current implementation does not apply `maxConcurrentDownloads`, `retryAttempts`, `waitForSelector`, `useNetworkCapture`, `videoSource`, or `content` as configurable controls. Downloads are sequential; video detection attempts network capture and then the first DOM video source.
 
-For each website, you can configure:
+## Authentication and format limits
 
-- **selectors**: CSS selectors for finding elements
-  - `courseTitle`: Course title element
-  - `videoPlayer`: Video player element
-  - `videoSource`: Video source elements
-  - `lessonList`: Lesson navigation links
-  - `documents`: Document download links
-  - `content`: Main content area
+For a website configured with `requiresAuth: true`, the browser opens visibly. Log in manually, reach the course page, and press Enter in the terminal to continue. Browser session cookies are not forwarded automatically to Axios or FFmpeg, so protected asset URLs may still fail.
 
-- **requiresAuth**: Set to `true` if login is required
-- **waitForSelector**: Element to wait for before extraction
+The downloader handles direct HTTP video files and HLS URLs whose pathname ends in `.m3u8`, plus HLS playlists identified by captured network responses. Direct videos are saved with an `.mp4` filename without transcoding; the original container may differ. DASH, DRM-protected video, and browser-only `blob:` URLs are not supported download formats. Configure document selectors for the file types your site exposes.
 
-## How It Works
+Use the tool only for content you are authorized to save and respect the source website's terms.
 
-1. **Browser Automation**: Uses Puppeteer to navigate and extract content
-2. **Content Extraction**: Identifies videos, documents, and lessons
-3. **Downloads**: Downloads all resources with progress tracking
-4. **Local Processing**: Rewrites HTML links to work offline
-5. **Index Generation**: Creates beautiful navigation pages
+## Output structure
 
-## Authentication
-
-For websites requiring authentication:
-
-1. The tool will open a browser window
-2. Log in manually in the browser
-3. Navigate to the course page
-4. Press Enter in the terminal to continue
-
-## Directory Structure
-
-```
+```text
 downloads/
-├── website.com/
-│   ├── Course Name/
-│   │   ├── videos/
-│   │   │   ├── 1_lesson-name.mp4
-│   │   │   └── 2_lesson-name.mp4
-│   │   ├── documents/
-│   │   │   ├── slides.pdf
-│   │   │   └── resources.zip
-│   │   ├── html/
-│   │   │   ├── 1_lesson-name.html
-│   │   │   └── images/
-│   │   ├── index.html
-│   │   └── manifest.json
+  example.com/
+    Course Name/
+      videos/
+      documents/
+      html/
+        images/
+      index.html
+      manifest.json
 ```
 
-## Supported Formats
+Filenames are sanitized, and generated navigation links encode URL path segments so spaces and punctuation work in the viewer. Image filenames include a URL-derived prefix to distinguish images with the same basename.
 
-### Videos
-- MP4 (direct download)
-- HLS/M3U8 (streaming playlists)
-- WebM
+## Validation
 
-### Documents
-- PDF
-- DOC/DOCX
-- PPT/PPTX
-- XLS/XLSX
-- ZIP/RAR
-
-## Troubleshooting
-
-### Videos not downloading
-- Check if the website uses DRM protection
-- Verify video selectors in config.json
-- Try manual authentication if required
-
-### Browser not opening
-- Ensure Puppeteer is properly installed
-- Check system dependencies for Chrome/Chromium
-
-### Download failures
-- Increase timeout in config.json
-- Check network connection
-- Verify you have authentication if needed
-
-## Advanced Usage
-
-### Custom Selectors
-
-Add website-specific configuration in `config.json`:
-
-```json
-"yoursite.com": {
-  "selectors": {
-    "courseTitle": ".course-header h1",
-    "videoPlayer": "#video-player",
-    "lessonList": ".lesson-nav a"
-  },
-  "requiresAuth": true
-}
+```bash
+npm test
 ```
 
-### Batch Downloads
-
-Create a script to download multiple courses:
-
-```javascript
-import CourseDownloader from './src/courseDownloader.js';
-
-const urls = [
-  'https://site.com/course1',
-  'https://site.com/course2'
-];
-
-for (const url of urls) {
-  await downloader.download(url);
-}
-```
-
-## Notes
-
-- This tool is for personal educational use only
-- Respect website terms of service
-- Ensure you have rights to download content
-- Some websites may have anti-scraping measures
+The regression suite uses temporary directories, small loopback HTTP fixtures, and a mocked browser boundary. It covers interrupted transfers, path validation, generated HTML, server bind errors, CLI startup, and partial course state. Set `TEST_FFMPEG_PATH` to an existing FFmpeg executable to also generate, download, and decode a tiny local HLS fixture. Tests do not log in to a website or download external course content.
 
 ## License
 
-MIT
+MIT, as declared in `package.json`.

@@ -3,13 +3,8 @@
 import { Command } from 'commander';
 import fs from 'fs-extra';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import CourseDownloader from './courseDownloader.js';
 import OfflineServer from './server.js';
 import logger from './utils/logger.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const program = new Command();
 
@@ -62,19 +57,23 @@ program
         config.downloadPath = options.output;
       }
 
+      const CourseDownloader = (await import('./courseDownloader.js')).default;
       const downloader = new CourseDownloader(config);
       const result = await downloader.download(url, options.website);
 
       if (result.success) {
-        logger.success('\n✓ All done!');
+        logger.success('\nAll done!');
         logger.info('\nTo view your course offline:');
         logger.info('  1. Run: npm run serve');
         logger.info('  2. Open: http://localhost:3000');
         logger.info(`  3. Or directly open: ${path.join(result.coursePath, 'index.html')}`);
+      } else {
+        logger.error(`Some resources failed to download. See ${path.join(result.coursePath, 'manifest.json')}`);
+        process.exitCode = 1;
       }
     } catch (error) {
-      logger.error(`\n✗ Error: ${error.message}`);
-      process.exit(1);
+      logger.error(`\nError: ${error.message}`);
+      process.exitCode = 1;
     }
   });
 
@@ -85,14 +84,14 @@ program
   .option('-d, --dir <path>', 'Downloads directory', './downloads')
   .action(async (options) => {
     try {
-      const port = parseInt(options.port, 10);
+      const port = Number(options.port);
       const server = new OfflineServer(port, options.dir);
 
       logger.info('Starting offline course viewer...\n');
       await server.start();
     } catch (error) {
       logger.error(`Failed to start server: ${error.message}`);
-      process.exit(1);
+      process.exitCode = 1;
     }
   });
 
@@ -121,7 +120,7 @@ program
         if (stats.isDirectory()) {
           const courses = await fs.readdir(websitePath);
 
-          logger.info(`📚 ${website}`);
+          logger.info(website);
 
           for (const course of courses) {
             const coursePath = path.join(websitePath, course);
@@ -148,6 +147,7 @@ program
       }
     } catch (error) {
       logger.error(`Failed to list courses: ${error.message}`);
+      process.exitCode = 1;
     }
   });
 
@@ -161,6 +161,7 @@ program
       console.log(JSON.stringify(config, null, 2));
     } catch (error) {
       logger.error(`Failed to load config: ${error.message}`);
+      process.exitCode = 1;
     }
   });
 
@@ -168,12 +169,13 @@ program
   .command('debug <url>')
   .description('Debug a course page to find the right selectors')
   .action(async (url) => {
+    let scraper;
     try {
       logger.info('Auto Video Grabber - Debug Mode\n');
 
       const config = await loadConfig();
       const BaseScraper = (await import('./scrapers/baseScraper.js')).default;
-      const scraper = new BaseScraper(url, config);
+      scraper = new BaseScraper(url, config);
 
       await scraper.initialize();
 
@@ -181,6 +183,7 @@ program
       const websiteConfig = config.websites[website] || config.websites.default;
 
       const navigated = await scraper.navigateTo(url, websiteConfig.requiresAuth);
+      if (!navigated) throw new Error('Failed to navigate to course URL');
 
       if (websiteConfig.requiresAuth) {
         await scraper.waitForAuth();
@@ -230,11 +233,12 @@ program
 
       logger.success('\nDebug info saved to: debug-page-structure.json');
 
-      await scraper.close();
     } catch (error) {
       logger.error(`Debug failed: ${error.message}`);
-      process.exit(1);
+      process.exitCode = 1;
+    } finally {
+      if (scraper) await scraper.close();
     }
   });
 
-program.parse();
+await program.parseAsync();
